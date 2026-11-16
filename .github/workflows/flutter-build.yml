@@ -167,19 +167,34 @@ jobs:
           MY_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
           MY_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
-          if [ -z "$MY_SERVER" ] || [ -z "$MY_KEY" ]; then
-            echo "::error::Secret RENDEZVOUS_SERVER o RS_PUB_KEY mancanti"
-            exit 1
-          fi
-          f=libs/hbb_common/src/config.rs
-          sed -i "s|^pub const RENDEZVOUS_SERVERS: &\[&str\] = .*|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$MY_SERVER\"];|" $f
-          sed -i "s|^pub const RS_PUB_KEY: &str = .*|pub const RS_PUB_KEY: \&str = \"$MY_KEY\";|" $f
-          grep -n -E '^pub const (RENDEZVOUS_SERVERS|RS_PUB_KEY)' $f
-          # Se le righe contengono ancora i valori ufficiali, la sostituzione non ha funzionato
-          if grep -q -E 'rs-ny.rustdesk.com|OeVuKk5nlHiXp' $f; then
-            echo "::error::Sostituzione server/chiave non riuscita in $f"
-            exit 1
-          fi
+          python3 -I - <<'PY'
+          import os, re, sys
+          server = os.environ["MY_SERVER"].strip()
+          key = os.environ["MY_KEY"].strip()
+          if not server or not key:
+              print("::error::Secret RENDEZVOUS_SERVER o RS_PUB_KEY mancanti")
+              sys.exit(1)
+          p = "libs/hbb_common/src/config.rs"
+          s = open(p, encoding="utf-8").read()
+          # 1) costanti di fallback
+          s, n1 = re.subn(r'^pub const RENDEZVOUS_SERVERS: &\[&str\] = .*$',
+                          lambda m: 'pub const RENDEZVOUS_SERVERS: &[&str] = &["%s"];' % server, s, flags=re.M)
+          s, n2 = re.subn(r'^pub const RS_PUB_KEY: &str = .*$',
+                          lambda m: 'pub const RS_PUB_KEY: &str = "%s";' % key, s, flags=re.M)
+          # 2) opzioni predefinite: compaiono nelle impostazioni di rete e hanno la precedenza
+          #    sulla configurazione memorizzata da eventuali avvii precedenti
+          old = "pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();"
+          new = ('pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from(['
+                 '("custom-rendezvous-server".to_owned(), "%s".to_owned()), '
+                 '("key".to_owned(), "%s".to_owned())]));') % (server, key)
+          n3 = s.count(old)
+          s = s.replace(old, new)
+          if (n1, n2, n3) != (1, 1, 1):
+              print("::error::Sostituzione non riuscita in config.rs", n1, n2, n3)
+              sys.exit(1)
+          open(p, "w", encoding="utf-8").write(s)
+          print("OK: server e chiave impostati", n1, n2, n3)
+          PY
 
       - name: Build rustdesk
         run: |
